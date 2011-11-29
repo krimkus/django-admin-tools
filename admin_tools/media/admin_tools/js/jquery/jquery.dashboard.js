@@ -46,6 +46,7 @@
                 _initialize($(this), options);
                 // restore positions, must be done *before* columnize
                 _restore_positions($(this), options);
+                _restore_flags($(this), options);
                 // columnize the dashboard modules
                 _columnize($(this), options);
                 // add draggable behaviour
@@ -59,6 +60,31 @@
                 // restore user preferences
                 _restore_preferences($(this), options);
             });
+        },
+        _calc_dashboard_pref: function() {
+            var pref = {
+                columns: [],
+                disabled: {},
+                collapsed: {},
+                positions: []
+            }
+
+            $(this).find('.dashboard-module').each(function() {
+                pref.disabled[this.id] = true;
+                pref.collapsed[this.id] = $(this).find('.collapsed').length > 0;
+            });
+
+            // count of columns to show in each row
+            $(this).children('.dashboard-column').each(function() {
+                var colmodules = $(this).children();
+                pref.columns.push(colmodules.length);
+                colmodules.each(function(){
+                    pref.positions.push(this.id);
+                    pref.disabled[this.id] = false;
+                });
+            });
+
+            return pref;
         }
     });
 
@@ -110,49 +136,81 @@
         }
     };
 
-    var _columnize = function(elt, options) {
+    var _restore_flags = function(elt, options) {
+        try {
+            var saved_disabled = _get_preference(options, 'disabled');
+        } catch (e) {
+            return;
+        }
         var elts = elt.children('div[id!=' + options.panel_id +']');
+        elts.each(function() {
+            var module = $(this);
+            var is_disabled = saved_disabled[module.attr('id')];
+            
+            if (typeof is_disabled === 'undefined') {
+                // No state saved for this module, use default
+            } else {
+                if (is_disabled) {
+                    module.addClass('disabled');
+                } else {
+                    module.removeClass('disabled');
+                }
+            }
+        });
+    };
+
+    var _columnize = function(elt, options) {
+        var elts = elt.children('div[id!=' + options.panel_id +']:not(.disabled)');
         var size = Math.ceil(elts.length / options.columns);
         var sizes = _get_preference(options, 'columns');
         var percent = Math.floor(100 / options.columns);
+        if ($.browser.msie && $.browser.version < 8.0) {
+            percent -= 0.1;
+        }
         var start = 0;
         var stop = 0;
-        var last_stop = 0;
-        if (options.columns != sizes.length) {
-            // don't break layout if columns count changed
-            sizes = [];
-        }
+
+        var columns = [];
+
         for (var i = 0; i < options.columns; i++) {
             if (typeof(sizes[i]) == 'undefined') {
                 start = i * size;
                 stop  = start + size;
-                last_stop = stop;
             } else if (sizes[i] == 0) {
-                var empty_col = '<div class="dashboard-column" style="float:left;width:'+percent+'%;"/>';
-                if ($('.dashboard-column').last().length) {
-                    $('.dashboard-column').last().after(empty_col);
-                } else {
-                    elt.prepend(empty_col);
-                }
+                columns.push($('<div class="dashboard-column" style="float:left;width:'+percent+'%;"/>'));
                 continue;
             } else {
-                start = (i == 0) ? 0 : start + last_stop;
+                start = (i == 0) ? 0 : start + sizes[i-1];
                 stop  = start + sizes[i];
-                last_stop = sizes[i];
             }
-            elts.slice(start, stop).wrapAll(
-                '<div class="dashboard-column" style="float:left;width:'+percent+'%;"/>'
-            );
+            var col = ($('<div class="dashboard-column" style="float:left;width:'+percent+'%;"/>'));
+            elts.slice(start, stop).appendTo(col);
+            columns.push(col);
+        }
+
+        $.each(columns, function(i, v) {
+            elt.append(v);
+        });
+
+        if ($.browser.msie && $.browser.version < 8.0) {
+            $('.dashboard-column:last').css('float', 'right');
         }
     };
 
     var _restore_preferences = function(elt, options) {
-        elt.children().children('.disabled').each(function() {
+        elt.find('.dashboard-module.disabled').each(function() {
             _delete_element($(this), options);
         });
-        if (_get_preference(options, 'disabled')) {
-            $.each(_get_preference(options, 'disabled'), function(k, v) {
-                v ? _delete_element($('#'+k), options) : _add_element($('#'+k), options);
+        var disabled = _get_preference(options, 'disabled')
+        ;
+        if (disabled) {
+            $.each(disabled, function(k, v) {
+                var m = $('#' + k);
+                if (m.length > 0) {
+                    v ? _delete_element(m, options) : _add_element(m, options);
+                } else {
+                    delete disabled[k];
+                }
             });
         }
         if (_get_preference(options, 'collapsed')) {
@@ -179,18 +237,13 @@
             cursor: 'crosshair',
             opacity: 0.7,
             update: function() {
-                _set_preference(options, 'positions', false, _get_positions(elt, options));
-                var columns = [];
-                elt.children('.dashboard-column').each(function() {
-                    columns.push($(this).children().length);
-                });
-                _set_preference(options, 'columns', false, columns, true);
+                _save_preferences(elt, options);
             }
         });
     };
 
     var _set_collapsible = function(elt, options) {
-        elt.find('> .dashboard-column > .collapsible > h2').each(function() {
+        elt.find('.collapsible > h2').each(function() {
             $(this).append('<a href="#" class="toggle-icon">Toggle</a>').find('a.toggle-icon').click(function() {
                 var prnt = $(this).parent().parent();
                 _toggle_element(prnt, options, true);
@@ -200,14 +253,15 @@
 
     var _toggle_element = function(elt, options, save_preference) {
         elt.find('h2 a.toggle-icon').toggleClass('collapsed');
-        elt.children('div').slideToggle();
-        if (save_preference) {
-            _set_preference(options, 'collapsed', elt.attr('id'), elt.find('h2 a.toggle-icon').hasClass('collapsed'), true);
-        }
+        elt.children('div').slideToggle(500, function() {
+            if (save_preference) {
+                _save_preferences(elt, options);
+            }
+        });
     };
 
     var _set_deletable = function(elt, options) {
-        elt.find('> .dashboard-column > .deletable > h2').each(function() {
+        elt.find('.deletable > h2').each(function() {
             $(this).append('<a href="#" class="close-icon">Close</a>').find('a.close-icon').click(function() {
                 var prnt = $(this).parent().parent();
                 _delete_element(prnt, options, true);
@@ -234,11 +288,14 @@
         } else {
             existing.parent().show();
         }
-        elt.fadeOut('fast');
-        $('#' + options.panel_id).show();
-        if (save_preference) {
-            _set_preference(options, 'disabled', elt.attr('id'), true, true);
-        }
+        elt.fadeOut('fast', function() {
+            var container = elt.closest('.dashboard-container');
+            elt.detach().appendTo(container);
+            $('#' + options.panel_id).show();
+            if (save_preference) {
+                _save_preferences(elt, options);
+            }
+        });
     };
 
     var _set_addable = function(elt, options, elts) {
@@ -254,9 +311,16 @@
         var panel_elt = $('#'+options.panel_id).find('li a[rel='+elt.attr('id')+']');
         panel_elt.parent().remove();
         elt.removeClass('disabled');
+        if (elt.closest('.dashboard-column').length === 0) {
+            elt
+                .closest('.dashboard-container')
+                .find('.dashboard-column:last')
+                .prepend(elt);
+            elt.show();
+        }
         elt.fadeIn('fast');
         if (save_preference) {
-            _set_preference(options, 'disabled', elt.attr('id'), false, true);
+            _save_preferences(elt, options);
         }
         // if there's no element in the panel, hide it
         if (!$('#' + options.panel_id).find('li').length) {
@@ -293,20 +357,11 @@
     // not modified...
     var last_saved_preferences = null;
 
-    var _set_preference = function(options, cat, id, val, save) {
-        try {
-            if (preferences[cat] == undefined) {
-                preferences[cat] = {};
-            }
-            if (id) {
-                preferences[cat][id] = val;
-            } else {
-                preferences[cat] = val;
-            }
-        } catch (e) {
-        }
+    function _save_preferences(elt, options) {
+        var preferences = elt.closest('.dashboard-container')._calc_dashboard_pref();
+
         // save preferences
-        if (save && JSON.stringify(preferences) != last_saved_preferences) {
+        if (JSON.stringify(preferences) != last_saved_preferences) {
             if (options.save_preferences_function) {
                 options.save_preferences_function(options, preferences);
             } else {
